@@ -24,7 +24,7 @@ crossroad-detector/
 │   ├── lockfile.ts       #   lockfile utility (path passed by caller)
 │   └── index.ts          #   public exports
 ├── model/                # model artifacts
-│   ├── model.onnx        #   v7 INT8 DistilBERT (~129 MB) — GitHub Release asset, NOT in git
+│   ├── model.onnx        #   v8 INT8 DistilBERT (~129 MB) — GitHub Release asset, NOT in git
 │   ├── model.lock.json   #   pinned release tag + size + SHA256 for model.onnx
 │   └── tokenizer.json    #   WordPiece tokenizer (tracked in git)
 ├── scripts/              # dev/ops scripts
@@ -104,10 +104,25 @@ after 15 min idle.
 
 ## Model
 
-**v7** — fine-tuned multilingual DistilBERT, trained on 448-char contiguous tiles
-(chunker v2), with the word-embeddings table INT8-quantized (412 MB → 136 MB at
-F1 0.8772 vs the 0.8786 baseline). Test F1 = 0.9050 (torch) / 0.8772 (ONNX INT8).
-See `trainer/README.md` for training details and measured results.
+**v8** — fine-tuned multilingual DistilBERT, trained on 448-char contiguous tiles
+(chunker v2), with the word-embeddings table INT8-quantized (412 MB → 136 MB).
+Round 4 expanded the peer-generated corpus (638 → 794 positive chunks, English
+class ratio 1:12.7 → 1:9.0) and fixed a document-level split leak in
+`trainer/train.py` (splits are now grouped by the doc_id/topic_id connected
+component, so no document or topic is torn across train/val/test).
+
+Measured on the corrected split (test n=843, 95 positives, seed 42):
+
+| artifact | en F1 | zh F1 | ALL F1 |
+|---|---|---|---|
+| v7 INT8 (previous) | 0.8431 | 0.8889 | 0.8621 |
+| v8 torch (fp32) | 0.8929 | 0.9610 | 0.9206 |
+| **v8 INT8** (shipped) | 0.8868 | 0.9600 | **0.9171** |
+
+v8 INT8 improves overall F1 by +0.0550 over v7 on this split, at the same
+~129 MB. (The older "F1 0.8772" figure was measured on the pre-fix, leaky split
+and is not comparable; the like-for-like v7 score is 0.8621.) See
+`trainer/README.md` for training details and measured results.
 
 ## License
 
