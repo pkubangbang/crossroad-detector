@@ -19,7 +19,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "fetch-model": "node scripts/fetch-model.mjs",
-    "prepack": "npm run build",
+    "verify-model": "node scripts/fetch-model.mjs --verify",
+    "release:check": "node scripts/fetch-model.mjs --verify --if-present && npm run build",
+    "prepack": "node scripts/fetch-model.mjs --verify --if-present && npm run build",
     "test": "echo 'no tests yet' && exit 0"
   },
   "license": "MIT",
