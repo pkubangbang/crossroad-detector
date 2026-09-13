@@ -5,7 +5,21 @@ __pycache__/
 
 # Training artifacts (large, regenerated from corpus)
 out/
-corpus/
+
+# Training corpus — source documents + lineage are vendored in git for model
+# reproducibility. The corpus is part of the repo but is NOT shipped in the
+# npm package (package.json "files" only whitelists dist/ and model/).
+# The chunked bundles below are DERIVED (regenerable from harvested.jsonl /
+# combined.jsonl via gen_chunks.py / chunker_v2.py), so they are treated as
+# build artifacts and stay out of git.
+trainer/corpus/chunks.jsonl
+trainer/corpus/*.chunks.jsonl
+trainer/corpus/*.chunks.v2.jsonl
+trainer/corpus/*.stats.json
+# Backups and ad-hoc scratch are regenerable residue, so they stay out.
+trainer/corpus/**/*.bak
+trainer/corpus/**/*.tmp
+trainer/corpus/**/__pycache__/
 
 # Node.js
 node_modules/
