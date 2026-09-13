@@ -19,9 +19,17 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "fetch-model": "node scripts/fetch-model.mjs",
+    "prepublishOnly": "npm run build",
     "test": "echo 'no tests yet' && exit 0"
   },
   "license": "MIT",
+  "author": "pkubangbang <pkubangbang@pku.edu.cn>",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/pkubangbang/crossroad-detector.git"

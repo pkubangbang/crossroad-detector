@@ -98,7 +98,13 @@ def main() -> int:
         q = out.with_suffix(".int8.onnx")
         # Narrow scope first: exclude ops that commonly break DistilBERT shape
         # inference (MatMul on reshaped attention, and Gather for embeddings).
+        # NOTE: "narrow" skips Gather, which leaves the word_embeddings table at
+        # fp32 — 367 MB of the 412 MB file! "embeddings" INCLUDES Gather so the
+        # embedding table is quantized too; that drops the artifact to ~136 MB
+        # (33%) at F1 0.8772 vs 0.8786 baseline (measured, n=850). "narrow" is
+        # kept as a fallback only if quantizing Gather ever fails.
         attempts = [
+            ("embeddings", {"op_types_to_quantize": ["MatMul", "Gemm", "Gather"]}),
             ("narrow", {"op_types_to_quantize": ["MatMul", "Gemm"]}),
             ("default", {}),
         ]

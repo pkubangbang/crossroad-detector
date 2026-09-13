@@ -23,7 +23,7 @@ crossroad-detector/
 │   ├── lockfile.ts       #   lockfile utility (path passed by caller)
 │   └── index.ts          #   public exports
 ├── model/                # model artifacts
-│   ├── model.onnx        #   v6 INT8 DistilBERT (~393 MB) — GitHub Release asset, NOT in git
+│   ├── model.onnx        #   v7 INT8 DistilBERT (~129 MB) — GitHub Release asset, NOT in git
 │   └── tokenizer.json    #   WordPiece tokenizer (tracked in git)
 ├── scripts/              # dev/ops scripts
 │   └── fetch-model.mjs   #   download model.onnx from the GitHub Release
@@ -34,7 +34,7 @@ crossroad-detector/
 
 ## Getting the model
 
-`model/model.onnx` (~393 MB) exceeds GitHub's 100 MiB git file limit, so it is
+`model/model.onnx` (~129 MB) exceeds GitHub's 100 MiB git file limit, so it is
 **not tracked in git**. It is published as an asset on the
 [GitHub Release](https://github.com/pkubangbang/crossroad-detector/releases).
 After cloning, fetch it once:

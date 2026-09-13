@@ -30,7 +30,7 @@ const ASSET = 'model.onnx';
 
 // Expected SHA256 of the v6 INT8 DistilBERT ONNX (verified copy in
 // trainer/out/model-v6-onnx). Empty string disables verification.
-const EXPECTED_SHA256 = 'd5665403cbd268521b1b60582e9b57cdfea3eb9a1ea03b3456b60a8d8e069387';
+const EXPECTED_SHA256 = 'd040b91824d032857bb23c403a0299311bfaf498ce169812129dbf2d817e2996';
 
 function readRepo() {
   if (process.env.GITHUB_REPO) return process.env.GITHUB_REPO;
