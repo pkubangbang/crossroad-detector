@@ -22,13 +22,30 @@ crossroad-detector/
 │   ├── client.ts         #   CrossroadDetector class — lazy spawn + HTTP detect
 │   ├── lockfile.ts       #   lockfile utility (path passed by caller)
 │   └── index.ts          #   public exports
-├── model/                # vendored model artifacts (shipped with the package)
-│   ├── model.onnx        #   v6 INT8 DistilBERT (~393 MB)
-│   └── tokenizer.json    #   WordPiece tokenizer
+├── model/                # model artifacts
+│   ├── model.onnx        #   v6 INT8 DistilBERT (~393 MB) — GitHub Release asset, NOT in git
+│   └── tokenizer.json    #   WordPiece tokenizer (tracked in git)
+├── scripts/              # dev/ops scripts
+│   └── fetch-model.mjs   #   download model.onnx from the GitHub Release
 ├── dist/                 # compiled JS (gitignored in dev, shipped when published)
 └── .mycc/skills/         # project-level skills for mycc
     └── crossroad-corpus-farmer/
 ```
+
+## Getting the model
+
+`model/model.onnx` (~393 MB) exceeds GitHub's 100 MiB git file limit, so it is
+**not tracked in git**. It is published as an asset on the
+[GitHub Release](https://github.com/pkubangbang/crossroad-detector/releases).
+After cloning, fetch it once:
+
+```bash
+npm run fetch-model        # downloads to model/model.onnx and verifies SHA256
+```
+
+Set `HTTPS_PROXY=http://127.0.0.1:7777` if you need a proxy. The npm-published
+package bundles the model directly, so `npm install @pkubangbang/crossroad-detector`
+needs no extra step.
 
 ## Usage (from mycc)
 

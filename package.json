@@ -18,9 +18,14 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
+    "fetch-model": "node scripts/fetch-model.mjs",
     "test": "echo 'no tests yet' && exit 0"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pkubangbang/crossroad-detector.git"
+  },
   "dependencies": {
     "onnxruntime-node": "^1.29.0"
   },

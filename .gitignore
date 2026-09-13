@@ -30,3 +30,5 @@ Thumbs.db
 .mycc/*
 !.mycc/skills/
 !.mycc/skills/**
+
+/.mycc/*
