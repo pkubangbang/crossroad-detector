@@ -3,8 +3,14 @@
 
 Key correctness requirements (see machine-learning/crossroad-trainer/plan-crossroad-distilbert-chunks.md):
 
-  * SPLIT BY topic_id, NOT by row. topic_id must be disjoint across
-    train/val/test. Reusing a topic across splits is exactly the v2 failure.
+  * SPLIT BY doc_id, NOT by row (and not by topic_id). The DOCUMENT is the
+    atomic unit: the chunker emits overlapping windows of one document, so a
+    document torn across splits puts near-identical windows in both train and
+    test. 27 doc_ids in the balanced corpus map to >1 topic_id, so grouping by
+    topic_id still leaked those documents (9-17 doc_ids / seed). Grouping by
+    doc_id is strictly stronger; see check_doc_leak.py for the per-seed proof.
+    (Historic v2 failure - identical text with opposite labels - is still
+    prevented, because a document's labels travel together.)
   * CLASS WEIGHTING from the observed pos:neg ratio. Harvested data is
     ~1:150, so unweighted training collapses to the majority class. We do NOT
     duplicate windows (that would re-couple class to length); we weight the
@@ -73,36 +79,91 @@ def load_chunks(path: Path) -> list[dict]:
     return rows
 
 
-def split_by_topic(rows: list[dict], seed: int, val_frac=0.15, test_frac=0.15):
-    """Disjoint topic_id split. Positives are rare, so we stratify by whether
-    the topic contains a positive chunk."""
-    topics: dict[str, dict] = {}
-    for r in rows:
-        t = r["topic_id"]
-        e = topics.setdefault(t, {"rows": [], "has_pos": False})
-        e["rows"].append(r)
-        if r["label"] == 1:
-            e["has_pos"] = True
+def _atomic_group_key(r: dict) -> tuple[str, str]:
+    """The two identifiers that must travel together for row `r`."""
+    return (r.get("doc_id") or r["topic_id"], r["topic_id"])
 
-    pos_topics = [t for t, e in topics.items() if e["has_pos"]]
-    neg_topics = [t for t, e in topics.items() if not e["has_pos"]]
+
+def group_atomic(rows: list[dict]) -> dict[str, list[dict]]:
+    """Partition rows into leak-proof groups.
+
+    A group is a connected component of the bipartite graph over {doc_id,
+    topic_id}. This is the smallest unit that is simultaneously
+    document-disjoint AND topic-disjoint, which is exactly what the split needs:
+      * grouping by topic_id tears documents whose windows carry >1 topic_id
+        (27 such doc_ids in corpus/balanced.chunks.v2.jsonl) -> train/test
+        overlap on near-identical windows;
+      * grouping by doc_id alone tears TOPICS that span several docs
+        (8 such topic_ids), reintroducing the v2 failure mode at topic level.
+    Their union (connected components) has neither defect. It is also cheap:
+    3616 components vs 3625 doc_ids, largest component 32 rows.
+
+    Deterministic and row-order independent: a component is keyed by the
+    lexicographically smallest member, so the grouping does not depend on the
+    order lines appear in the file.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:  # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for r in rows:
+        doc, topic = _atomic_group_key(r)
+        for node in (f"d:{doc}", f"t:{topic}"):
+            parent.setdefault(node, node)
+        union(f"d:{doc}", f"t:{topic}")
+
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        doc, _ = _atomic_group_key(r)
+        root = find(f"d:{doc}")
+        groups.setdefault(root, []).append(r)
+    return groups
+
+
+def split_by_doc(rows: list[dict], seed: int, val_frac=0.15, test_frac=0.15):
+    """Leak-proof split. The atomic unit is the document, widened to the
+    doc_id/topic_id connected component so no topic is torn either (see
+    group_atomic). Positives are rare, so we stratify by whether the group
+    contains a positive chunk - the same semantics as the previous topic-based
+    split; only the grouping key changed.
+    """
+    raw_groups = group_atomic(rows)
+    groups: dict[str, dict] = {}
+    for members in raw_groups.values():
+        key = min(members[0].get("doc_id") or members[0]["topic_id"],
+                  members[0]["topic_id"])
+        groups[key] = {"rows": members, "has_pos": any(m["label"] == 1 for m in members)}
+
+    pos_groups = [g for g, e in groups.items() if e["has_pos"]]
+    neg_groups = [g for g, e in groups.items() if not e["has_pos"]]
     rng = random.Random(seed)
-    rng.shuffle(pos_topics)
-    rng.shuffle(neg_topics)
+    rng.shuffle(pos_groups)
+    rng.shuffle(neg_groups)
 
     def take(lst, frac):
         k = max(1, int(len(lst) * frac)) if lst else 0
         return lst[:k], lst[k:]
 
-    pv, pos_rest = take(pos_topics, val_frac)
+    pv, pos_rest = take(pos_groups, val_frac)
     pt, pos_rest = take(pos_rest, test_frac / max(1e-9, 1 - val_frac))
-    nv, neg_rest = take(neg_topics, val_frac)
+    nv, neg_rest = take(neg_groups, val_frac)
     nt, neg_rest = take(neg_rest, test_frac / max(1e-9, 1 - val_frac))
 
-    def collect(ts):
+    def collect(gs):
         out = []
-        for t in ts:
-            out.extend(topics[t]["rows"])
+        for g in gs:
+            out.extend(groups[g]["rows"])
         return out
 
     return (
@@ -110,6 +171,12 @@ def split_by_topic(rows: list[dict], seed: int, val_frac=0.15, test_frac=0.15):
         collect(pv + nv),
         collect(pt + nt),
     )
+
+
+# Backwards-compatible alias. eval_test.py, eval_test_onnx.py, eval_v7.py,
+# export_misclassified.py and check_topic_leak.py all import `split_by_topic`;
+# the name is kept so they run unchanged, but it now splits leak-proof.
+split_by_topic = split_by_doc
 
 
 def eval_rows(model, loader, device) -> list[dict]:
