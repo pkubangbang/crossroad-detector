@@ -24,6 +24,7 @@ crossroad-detector/
 │   └── index.ts          #   public exports
 ├── model/                # model artifacts
 │   ├── model.onnx        #   v7 INT8 DistilBERT (~129 MB) — GitHub Release asset, NOT in git
+│   ├── model.lock.json   #   pinned release tag + size + SHA256 for model.onnx
 │   └── tokenizer.json    #   WordPiece tokenizer (tracked in git)
 ├── scripts/              # dev/ops scripts
 │   └── fetch-model.mjs   #   download model.onnx from the GitHub Release
@@ -40,12 +41,17 @@ crossroad-detector/
 After cloning, fetch it once:
 
 ```bash
-npm run fetch-model        # downloads to model/model.onnx and verifies SHA256
+npm run fetch-model            # downloads to model/model.onnx and verifies SHA256
+npm run fetch-model -- --verify  # offline: hash the local copy against the lockfile
 ```
 
 Set `HTTPS_PROXY=http://127.0.0.1:7777` if you need a proxy. The npm-published
 package bundles the model directly, so `npm install @pkubangbang/crossroad-detector`
 needs no extra step.
+
+`model/model.lock.json` is the tracked source of truth for the binary: it pins the
+release tag, exact byte size, and SHA256, so the repo always records which model
+it expects without carrying the 129 MB file itself.
 
 ## Usage (from mycc)
 
@@ -69,9 +75,10 @@ after 15 min idle.
 
 ## Model
 
-**v6** — fine-tuned multilingual DistilBERT, trained on 448-char contiguous tiles
-(chunker v2). Test F1 = 0.9050 (torch) / 0.8786 (ONNX INT8). See `trainer/README.md`
-for training details and measured results.
+**v7** — fine-tuned multilingual DistilBERT, trained on 448-char contiguous tiles
+(chunker v2), with the word-embeddings table INT8-quantized (412 MB → 136 MB at
+F1 0.8772 vs the 0.8786 baseline). Test F1 = 0.9050 (torch) / 0.8772 (ONNX INT8).
+See `trainer/README.md` for training details and measured results.
 
 ## License
 

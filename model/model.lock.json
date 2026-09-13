@@ -1,0 +1,8 @@
+{
+  "asset": "model.onnx",
+  "repo": "pkubangbang/crossroad-detector",
+  "tag": "v0.1.1",
+  "modelVersion": "v7",
+  "bytes": 135693412,
+  "sha256": "d040b91824d032857bb23c403a0299311bfaf498ce169812129dbf2d817e2996"
+}

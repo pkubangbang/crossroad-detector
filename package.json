@@ -19,7 +19,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "fetch-model": "node scripts/fetch-model.mjs",
-    "prepublishOnly": "npm run build",
+    "prepack": "npm run build",
     "test": "echo 'no tests yet' && exit 0"
   },
   "license": "MIT",

@@ -14,8 +14,9 @@ dist/
 # Logs
 *.log
 
-# Model artifacts: tokenizer is vendored in model/ and tracked in git.
-# Exception: the 393 MB ONNX binary is distributed via GitHub Release, not git.
+# Model artifacts: tokenizer + model.lock.json are vendored in model/ and
+# tracked in git. Exception: the 129 MB ONNX binary is distributed via the
+# GitHub Release, not git (fetch it with `npm run fetch-model`).
 model/model.onnx
 
 # OS
