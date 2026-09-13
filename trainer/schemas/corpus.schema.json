@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mycc/crossroad-trainer/corpus.schema.json",
+  "title": "Crossroad corpus sample (document level)",
+  "description": "One JSON object per line (JSONL). Produced by the peer fleet, consumed by gen_chunks.py. Document-level: peers NEVER choose chunk boundaries — the harness derives overlapping chunks deterministically.",
+  "type": "object",
+  "required": [
+    "id",
+    "text",
+    "has_turn",
+    "first_turn_pos",
+    "scenario",
+    "turn_type",
+    "is_negative",
+    "lang",
+    "word_count",
+    "topic_id"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Globally unique. Convention: <lang>-<peerSession8>-<seq> e.g. 'en-a1b2c3d4-0007'.",
+      "minLength": 6
+    },
+    "text": {
+      "type": "string",
+      "description": "The full multi-sentence response text. Must be >= 40 chars.",
+      "minLength": 40
+    },
+    "has_turn": {
+      "type": "boolean",
+      "description": "true iff the text contains a genuine semantic direction reversal."
+    },
+    "first_turn_pos": {
+      "type": "integer",
+      "description": "CHARACTER offset (0-based, into `text`) of the FIRST genuine turning point. MUST be -1 when has_turn=false, and MUST satisfy 0 <= first_turn_pos < len(text) when has_turn=true. Character offset, NOT a byte offset and NOT a token index.",
+      "minimum": -1
+    },
+    "scenario": {
+      "type": "string",
+      "enum": ["coding", "planning", "debugging", "analysis", "teaching"],
+      "description": "The conversational setting the response occurs in."
+    },
+    "turn_type": {
+      "type": "string",
+      "enum": [
+        "strong-phrase",
+        "interjection",
+        "clausal-adversative",
+        "self-correction",
+        "hedged-return",
+        "none"
+      ],
+      "description": "The KIND of turn. MUST be 'none' when has_turn=false. When has_turn=true it must be one of the five real types (never 'none')."
+    },
+    "is_negative": {
+      "type": "boolean",
+      "description": "true for a sample with no turn. MUST equal (!has_turn) — the two fields are redundant on purpose so a mismatch is detectable."
+    },
+    "lang": {
+      "type": "string",
+      "enum": ["en", "zh"],
+      "description": "Primary language. 'zh' when the CJK character ratio (ignoring whitespace) is >= 0.5, else 'en'. Same rule as C:/Proj/turning-word-detection/validate-distribution.ps1."
+    },
+    "word_count": {
+      "type": "integer",
+      "description": "EN: whitespace-separated token count. ZH: non-whitespace character count (1 char = 1 word). Mixed: applied per the `lang` rule. MUST match the validate-distribution.ps1 calculation exactly.",
+      "minimum": 1
+    },
+    "topic_id": {
+      "type": "string",
+      "description": "CRITICAL ANTI-LEAKAGE FIELD. Identifies the topic/template family. Every topic_id used in train MUST NOT appear in val or test. Reusing a topic across splits is what made the v2 attempt learn nothing (identical texts, opposite labels -> loss pinned at ln(2)). Give each distinct topic a distinct id, e.g. 'auth-oauth-saml'.",
+      "minLength": 3
+    },
+    "source_model": {
+      "type": "string",
+      "description": "The LLM that wrote the text, e.g. 'deepseek-v4-flash:cloud'.",
+      "minLength": 3
+    },
+    "peer_session": {
+      "type": "string",
+      "description": "Session-id of the generating peer instance.",
+      "minLength": 8
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["generated", "harvested"],
+      "description": "'generated' for peer-produced samples, 'harvested' for records mined from .mycc/sessions."
+    },
+    "conjunction": {
+      "type": ["string", "null"],
+      "description": "For negatives only: the confusable surface form being exercised (e.g. 'wait for', '等等', 'but-mid-sentence'), or null. Lets the gate verify confusable coverage."
+    },
+    "verified_by": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Session-ids of peers that verified this sample. Filled during cross-check (Phase 4). Empty on submission."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pending", "approve", "reject"],
+      "description": "Cross-check outcome. 'pending' on submission; set by the verifier."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "has_turn": { "const": true } } },
+      "then": {
+        "properties": {
+          "turn_type": { "enum": ["strong-phrase", "interjection", "clausal-adversative", "self-correction", "hedged-return"] },
+          "first_turn_pos": { "minimum": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "turn_type": { "const": "none" },
+          "first_turn_pos": { "const": -1 },
+          "is_negative": { "const": true }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# crossroad-trainer — Python training harness for the chunk-based crossroad detector
+#
+# Install into the local venv (CPU-only torch; this machine has no NVIDIA GPU):
+#   python -m venv .venv
+#   .venv/Scripts/python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   .venv/Scripts/python.exe -m pip install -r requirements.txt
+#
+# NOTE: torch MUST come from the CPU index above, not PyPI. On Windows the PyPI
+# wheel pulls CUDA deps that fail to load on this machine.
+# torch is intentionally NOT listed here (it needs --index-url); see README.md.
+
+transformers==5.17.0
+tokenizers==0.23.2
+huggingface_hub==1.31.0
+safetensors==0.8.0
+onnx==1.22.0
+onnxruntime==1.29.0
+numpy==2.5.3
+scikit-learn==1.9.0
+onnxscript>=0.7.2

@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Training artifacts (large, regenerated from corpus)
+out/
+corpus/
+
+# Node.js
+node_modules/
+dist/
+
+# Logs
+*.log
+
+# Model artifacts: tokenizer is vendored in model/ and tracked in git.
+# Exception: the 393 MB ONNX binary is distributed via GitHub Release, not git.
+model/model.onnx
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# mycc internal state (keep skills tracked)
+.mycc/*
+!.mycc/skills/
+!.mycc/skills/**
