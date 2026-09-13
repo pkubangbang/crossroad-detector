@@ -36,6 +36,10 @@ const DEST = join(MODEL_DIR, 'model.onnx');
 const MANIFEST = join(MODEL_DIR, 'model.lock.json');
 
 const VERIFY_ONLY = process.argv.includes('--verify') || process.argv.includes('-c');
+// With --if-present, a MISSING model.onnx is a skip (exit 0) rather than a
+// failure — used by prepack so a dev clone without the model can still pack,
+// while a PRESENT model must still match the lockfile exactly.
+const IF_PRESENT = process.argv.includes('--if-present');
 
 /**
  * Read model/model.lock.json — the tracked source of truth for the model
@@ -77,8 +81,28 @@ function hashFile(path) {
 async function download(url, dest, proxy) {
   const headers = { 'User-Agent': 'crossroad-detector-fetch-model' };
   const opts = { headers, redirect: 'follow' };
-  if (proxy) opts.dispatcher = undefined; // node fetch uses global proxy via env; keep simple
-
+  // Plain Node fetch ignores HTTP(S)_PROXY. Honor an explicit proxy via
+  // undici's ProxyAgent when it is resolvable (it ships inside Node's own
+  // dependency tree); if it is not, and the runtime does not honor
+  // NODE_USE_ENV_PROXY (Node < 24), fail fast rather than silently
+  // downloading DIRECT — a direct attempt through a required corporate proxy
+  // either hangs or hits the wrong endpoint.
+  if (proxy) {
+    let ProxyAgent;
+    try {
+      ({ ProxyAgent } = await import('undici'));
+    } catch {
+      ProxyAgent = undefined;
+    }
+    if (ProxyAgent) {
+      opts.dispatcher = new ProxyAgent(proxy);
+    } else if (process.env.NODE_USE_ENV_PROXY !== '1') {
+      throw new Error(
+        `a proxy is configured (${proxy}) but this Node ${process.version} cannot apply it to fetch.\n` +
+        `  Re-run with NODE_USE_ENV_PROXY=1 (Node >= 24) or install undici so its ProxyAgent is available.`
+      );
+    }
+  }
   const res = await fetch(url, opts);
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} ${res.statusText} for ${url}`);
@@ -112,6 +136,10 @@ async function download(url, dest, proxy) {
 /** Hash the on-disk model and compare against the manifest. No network. */
 async function verifyOnly(manifest) {
   if (!existsSync(DEST)) {
+    if (IF_PRESENT) {
+      console.log(`crossroad-detector: model.onnx not present — skipping verification.`);
+      return;
+    }
     console.error(`✗ ${DEST} is missing. Run "npm run fetch-model" to download it.`);
     process.exit(1);
   }
@@ -131,6 +159,9 @@ async function verifyOnly(manifest) {
     return;
   }
   console.error(`\n✗ model.onnx does NOT match model/model.lock.json.`);
+  if (!manifest.sha256) {
+    console.error(`  (model.lock.json has no "sha256" — register the artifact's hash first.)`);
+  }
   process.exit(1);
 }
 
@@ -165,21 +196,26 @@ async function main() {
     console.log(`  existing model.onnx will be replaced.`);
   }
 
-  const { sha256, tmp } = await download(url, DEST, proxy);
+  const tmp = `${DEST}.part`;
+  try {
+    const { sha256 } = await download(url, DEST, proxy);
 
-  if (manifest.sha256 && sha256 !== manifest.sha256) {
+    if (manifest.sha256 && sha256 !== manifest.sha256) {
+      throw new Error(
+        `SHA256 mismatch!\n  expected: ${manifest.sha256}\n  got:      ${sha256}\n` +
+        `The download was discarded. If the model was intentionally updated, ` +
+        `update model/model.lock.json.`
+      );
+    }
+
+    renameSync(tmp, DEST);
+    console.log(`\n✓ model.onnx saved to ${DEST}`);
+    console.log(`  sha256: ${sha256}`);
+    console.log(`  size:   ${(statSync(DEST).size / 1048576).toFixed(1)} MB`);
+  } finally {
+    // Always clean up a partial/temp file, whatever went wrong.
     rmSync(tmp, { force: true });
-    throw new Error(
-      `SHA256 mismatch!\n  expected: ${manifest.sha256}\n  got:      ${sha256}\n` +
-      `The download was discarded. If the model was intentionally updated, ` +
-      `update model/model.lock.json.`
-    );
   }
-
-  renameSync(tmp, DEST);
-  console.log(`\n✓ model.onnx saved to ${DEST}`);
-  console.log(`  sha256: ${sha256}`);
-  console.log(`  size:   ${(statSync(DEST).size / 1048576).toFixed(1)} MB`);
 }
 
 main().catch((err) => {

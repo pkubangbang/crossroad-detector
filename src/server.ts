@@ -1,20 +1,22 @@
 /**
- * server.ts — HTTP server hosting the v6 ONNX DistilBERT crossroad detector.
+ * server.ts — HTTP server hosting the v7 ONNX DistilBERT crossroad detector.
  *
  * Loads the vendored model from ../model/ (relative to dist/), exposes:
- *   GET  /health  → { status: "ok" }
- *   POST /detect  → { text, threshold } → { turn, word?, index?, score? }
+ *   GET  /health    → { status: "ok" }
+ *   POST /detect    → { text, threshold } → { turn, word?, index?, score? }
+ *   POST /shutdown  → { token } → 204 (graceful exit; 403 on bad token)
  *
  * The lockfile path is received via --lockfile <path> CLI arg (the caller
  * decides where it lives; this server has no knowledge of ~/.mycc-store).
  *
  * Lifecycle:
  *   - Binds 127.0.0.1:0 (random ephemeral port, localhost-only)
- *   - Writes { pid, port, startedAt } to the lockfile on startup
+ *   - Writes { pid, port, startedAt, token } to the lockfile on startup
  *   - Idle timer: 15 min since last request → exit + delete lockfile
  *   - SIGTERM/SIGINT → exit + delete lockfile
+ *   - POST /shutdown (with the lockfile token) → same graceful path
  *
- * Ported 1:1 from mycc's crossroad-encoder.ts (tokenizer + chunkSpans + ONNX
+ * Ported 1:1 from mycc's crossroad-encoder.ts (tokenizer + chunking + ONNX
  * inference), with the in-process detectTurn replaced by the HTTP handler.
  */
 
@@ -24,8 +26,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { argv, exit } from 'node:process';
+import { randomBytes } from 'node:crypto';
 
 import { writeLock, deleteLock } from './lockfile.js';
+import { buildChunksV2, X_CHARS, type CharSpan } from './chunker.js';
 
 // ============================================================================
 // CLI args
@@ -46,14 +50,18 @@ if (!lockfilePath) {
 // After the exit(1) guard, narrow to string for the rest of the module.
 const LOCKFILE: string = lockfilePath;
 
+// Per-server secret: authenticates graceful /shutdown and lets the client
+// confirm PID identity via the lockfile.
+const TOKEN: string = randomBytes(24).toString('hex');
+
 // ============================================================================
-// Windowing constants — MUST mirror trainer/chunker_v2.py (X_CHARS=448)
+// Windowing constants — MUST mirror trainer/chunker_v2.py
 // ============================================================================
 
-const WINDOW = 448;
 const MIN_CHUNK_CHARS = 8;
 const DEFAULT_THRESHOLD = 0.5;
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_BODY_BYTES = 8 * 1024 * 1024; // 8 MiB request body cap
 
 // ============================================================================
 // Model path — vendored in ../model/ relative to this compiled file
@@ -69,7 +77,8 @@ const TOK_PATH = join(MODEL_DIR, 'tokenizer.json');
 // Types
 // ============================================================================
 
-interface CharSpan { start: number; end: number; }
+
+
 
 interface EncoderState {
   session: import('onnxruntime-node').InferenceSession;
@@ -80,24 +89,6 @@ interface EncoderState {
   padId: number;
   doLowerCase: boolean;
   seqLen: number;
-}
-
-// ============================================================================
-// Window lattice (character offsets) — mirrors chunker_v2.build_chunks_v2
-// ============================================================================
-
-function chunkSpans(nChars: number, window = WINDOW): CharSpan[] {
-  if (nChars <= 0) return [];
-  if (nChars <= window) return [{ start: 0, end: nChars }];
-  const spans: CharSpan[] = [];
-  let start = 0;
-  while (start < nChars) {
-    const end = Math.min(start + window, nChars);
-    spans.push({ start, end });
-    if (end >= nChars) break;
-    start = end; // contiguous advance — no overlap, no gap
-  }
-  return spans;
 }
 
 // ============================================================================
@@ -115,6 +106,8 @@ function loadVocab(dir: string): Pick<EncoderState, 'vocab' | 'unkId' | 'clsId' 
   const cls = vocab.get('[CLS]') ?? 101;
   const sep = vocab.get('[SEP]') ?? 102;
   const pad = vocab.get('[PAD]') ?? 0;
+  // The tokenizer.json normalizer sets lowercase:false (model is *-cased), so
+  // doLowerCase stays false unless the file explicitly opts in.
   const doLowerCase = Boolean(model.do_lower_case);
   return { vocab, unkId: unk, clsId: cls, sepId: sep, padId: pad, doLowerCase };
 }
@@ -185,9 +178,18 @@ function encodeWindow(text: string, st: EncoderState): { inputIds: BigInt64Array
 // ============================================================================
 
 let state: EncoderState | null = null;
+let loadPromise: Promise<EncoderState> | null = null;
 
 async function ensureLoaded(): Promise<EncoderState> {
   if (state) return state;
+  // Coalesce concurrent first-use loads into ONE InferenceSession.create.
+  if (loadPromise === null) {
+    loadPromise = doLoad().finally(() => { loadPromise = null; });
+  }
+  return loadPromise;
+}
+
+async function doLoad(): Promise<EncoderState> {
   if (!existsSync(ONNX_PATH) || !existsSync(TOK_PATH)) {
     throw new Error(`Model artifacts missing at ${MODEL_DIR}`);
   }
@@ -197,7 +199,7 @@ async function ensureLoaded(): Promise<EncoderState> {
     graphOptimizationLevel: 'all',
   });
   const tok = loadVocab(MODEL_DIR);
-  state = { session, seqLen: WINDOW, ...tok };
+  state = { session, seqLen: X_CHARS, ...tok };
   return state;
 }
 
@@ -219,9 +221,9 @@ async function scoreWindow(text: string, st: EncoderState): Promise<number> {
 }
 
 const HINT = /(\bhowever\b|\bwait\b|\bbut\b|\bactually\b|\breconsider\b|\bon second thought\b|但|不过|其实|然而|等等|话说回来)/i;
-function lexicalHint(win: string): string | null {
+function lexicalHint(win: string): { word: string; offset: number } | null {
   const m = win.match(HINT);
-  return m ? m[0] : null;
+  return m && m.index !== undefined ? { word: m[0], offset: m.index } : null;
 }
 
 // ============================================================================
@@ -237,17 +239,26 @@ interface DetectResult {
 
 async function detect(text: string, threshold: number): Promise<DetectResult> {
   const st = await ensureLoaded();
-  const spans = chunkSpans(text.length);
+  const spans = buildChunksV2(text);
+  let best: { score: number; span: CharSpan } | null = null;
   for (const span of spans) {
     const win = text.slice(span.start, span.end);
     if (win.trim().length < MIN_CHUNK_CHARS) continue;
     const score = await scoreWindow(win, st);
     if (Number.isNaN(score)) continue;
-    if (score >= threshold) {
-      return { turn: true, word: lexicalHint(win) ?? '', index: span.start, score };
-    }
+    // Track the highest-scoring window so a later, stronger signal is not
+    // masked by an earlier weaker one crossing the threshold.
+    if (best === null || score > best.score) best = { score, span };
   }
-  return { turn: false };
+  if (best === null || best.score < threshold) return { turn: false };
+  const win = text.slice(best.span.start, best.span.end);
+  const hint = lexicalHint(win);
+  return {
+    turn: true,
+    word: hint?.word ?? '',
+    index: best.span.start + (hint?.offset ?? 0),
+    score: best.score,
+  };
 }
 
 // ============================================================================
@@ -255,65 +266,117 @@ async function detect(text: string, threshold: number): Promise<DetectResult> {
 // ============================================================================
 
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
+let shuttingDown = false;
 
 function resetIdleTimer(): void {
   if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    shutdown();
-  }, IDLE_TIMEOUT_MS);
+  idleTimer = setTimeout(shutdown, IDLE_TIMEOUT_MS);
+  // Don't let the idle timer keep the event loop alive on its own.
+  if (typeof idleTimer.unref === 'function') idleTimer.unref();
 }
 
 function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
   if (idleTimer) clearTimeout(idleTimer);
-  deleteLock(LOCKFILE);
-  server.close();
+  deleteLock(LOCKFILE, process.pid);
+  try { server.close(); } catch { /* ignore */ }
   exit(0);
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; });
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      data += chunk;
+    });
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });
 }
 
+function sendJson(res: import('node:http').ServerResponse, status: number, obj: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
+
 const server = createServer(async (req, res) => {
   resetIdleTimer();
 
-  if (req.method === 'GET' && req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+  // Compare on path only, so a query string does not 404 the route.
+  const path = (req.url ?? '').split('?')[0];
+
+  if (path === '/health') {
+    if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+    sendJson(res, 200, { status: 'ok' });
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/detect') {
+  if (path === '/detect') {
+    if (req.method !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
     try {
-      const body = JSON.parse(await readBody(req)) as { text: string; threshold?: number };
-      if (typeof body.text !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'missing "text" field' }));
+      const raw = await readBody(req);
+      let body: { text?: unknown; threshold?: unknown };
+      try {
+        body = JSON.parse(raw) as { text?: unknown; threshold?: unknown };
+      } catch {
+        sendJson(res, 400, { error: 'invalid JSON body' });
         return;
       }
-      const threshold = typeof body.threshold === 'number' ? body.threshold : DEFAULT_THRESHOLD;
+      if (typeof body.text !== 'string') {
+        sendJson(res, 400, { error: 'missing "text" field' });
+        return;
+      }
+      let threshold = DEFAULT_THRESHOLD;
+      if (body.threshold !== undefined) {
+        if (typeof body.threshold !== 'number' || !Number.isFinite(body.threshold) || body.threshold < 0 || body.threshold > 1) {
+          sendJson(res, 400, { error: 'threshold must be a finite number in [0, 1]' });
+          return;
+        }
+        threshold = body.threshold;
+      }
       const result = await detect(body.text, threshold);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
+      sendJson(res, 200, result);
     } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: String(err) }));
+      // Do not leak internal error strings (paths, stack shapes) to callers.
+      console.error('detect error:', err);
+      sendJson(res, 500, { error: 'internal error' });
     }
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'not found' }));
+  if (path === '/shutdown') {
+    if (req.method !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+    let body: { token?: unknown };
+    try {
+      body = JSON.parse(await readBody(req)) as { token?: unknown };
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    if (body.token !== TOKEN) {
+      sendJson(res, 403, { error: 'forbidden' });
+      return;
+    }
+    sendJson(res, 204, {});
+    // Give the response a tick to flush, then exit gracefully.
+    setImmediate(shutdown);
+    return;
+  }
+
+  sendJson(res, 404, { error: 'not found' });
 });
 
 server.on('error', (err) => {
   console.error('server error:', err);
-  deleteLock(LOCKFILE);
+  deleteLock(LOCKFILE, process.pid);
   exit(1);
 });
 
@@ -322,13 +385,14 @@ server.listen(0, '127.0.0.1', () => {
   const addr = server.address();
   if (addr && typeof addr === 'object' && 'port' in addr) {
     const port = (addr as AddressInfo).port;
-    writeLock(LOCKFILE, { pid: process.pid, port, startedAt: Date.now() });
+    writeLock(LOCKFILE, { pid: process.pid, port, startedAt: Date.now(), token: TOKEN });
     // Signal readiness on stderr (stdout stays clean for potential piping)
     console.error(`crossroad-detector server listening on 127.0.0.1:${port}`);
   }
   resetIdleTimer();
 });
 
-// Graceful shutdown on signals
+// Graceful shutdown on signals (POSIX). On Windows these may not fire for an
+// external kill; the client uses POST /shutdown there instead.
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

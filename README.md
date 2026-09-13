@@ -19,6 +19,7 @@ crossroad-detector/
 │   └── ...               #   see trainer/README.md
 ├── src/                  # Node.js server + client SDK (TypeScript)
 │   ├── server.ts         #   HTTP server: ONNX inference + WordPiece tokenizer
+│   ├── chunker.ts        #   segment tile-by-cap chunker (1:1 port of trainer/chunker_v2.py)
 │   ├── client.ts         #   CrossroadDetector class — lazy spawn + HTTP detect
 │   ├── lockfile.ts       #   lockfile utility (path passed by caller)
 │   └── index.ts          #   public exports
@@ -43,6 +44,7 @@ After cloning, fetch it once:
 ```bash
 npm run fetch-model            # downloads to model/model.onnx and verifies SHA256
 npm run fetch-model -- --verify  # offline: hash the local copy against the lockfile
+npm run verify-model           # alias for the offline verification above
 ```
 
 Set `HTTPS_PROXY=http://127.0.0.1:7777` if you need a proxy. The npm-published
@@ -52,6 +54,33 @@ needs no extra step.
 `model/model.lock.json` is the tracked source of truth for the binary: it pins the
 release tag, exact byte size, and SHA256, so the repo always records which model
 it expects without carrying the 129 MB file itself.
+
+**The fetched artifact must match the lockfile.** Both `fetch-model` (after a
+download) and `verify-model` hash the bytes and compare them against the SHA256
+in `model/model.lock.json`; any mismatch aborts with a non-zero exit. `prepack`
+runs the same check (`--verify --if-present`) before publishing, so a model that
+does not match the lockfile can never ship — while a dev clone without the model
+still packs (the check is skipped when no `model.onnx` is present).
+
+## Release workflow
+
+Model releases MUST follow this order — the lockfile is the anchor every later
+step is validated against:
+
+1. **Register the SHA256 in `model/model.lock.json`.** Produce the ONNX artifact
+   (`trainer/export_onnx.py`), compute its `sha256` and byte size, and commit
+   them (with the new `tag` and `modelVersion`) into `model/model.lock.json`
+   *first*. Everything downstream is checked against this pinned hash.
+2. **Push the source to GitHub.** Push the commit whose lockfile already names
+   the new artifact (including the version bump in `package.json`).
+3. **Upload the model to the GitHub Release** for the tag named in the lockfile,
+   as the asset `model.onnx`. `npm run fetch-model` then delivers exactly the
+   pinned bytes.
+4. **npm publish.** `prepack` re-verifies the bundled `model/` against the
+   lockfile before the tarball is built; publish only if that check passes.
+
+Verifying at each boundary: `npm run verify-model` after step 1/3 (offline hash),
+and `npm run fetch-model` on a clean clone after step 3.
 
 ## Usage (from mycc)
 
