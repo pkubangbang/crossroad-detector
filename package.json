@@ -1,6 +1,6 @@
 {
   "name": "@pkubangbang/crossroad-detector",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Semantic crossroad (turning-word) detector for mycc — ONNX DistilBERT server + client SDK, with training harness.",
   "type": "module",
   "main": "./dist/index.js",

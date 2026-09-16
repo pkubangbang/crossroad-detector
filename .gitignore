@@ -15,6 +15,7 @@ out/
 trainer/corpus/chunks.jsonl
 trainer/corpus/*.chunks.jsonl
 trainer/corpus/*.chunks.v2.jsonl
+trainer/corpus/*.chunks.v3.jsonl
 trainer/corpus/*.stats.json
 # Backups and ad-hoc scratch are regenerable residue, so they stay out.
 trainer/corpus/**/*.bak

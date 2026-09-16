@@ -29,7 +29,7 @@ import { argv, exit } from 'node:process';
 import { randomBytes } from 'node:crypto';
 
 import { writeLock, deleteLock } from './lockfile.js';
-import { buildChunksV2, X_CHARS, type CharSpan } from './chunker.js';
+import { buildChunksV3, toCodePoints, sliceCodePoints, X_CHARS, type CharSpan } from './chunker.js';
 
 // ============================================================================
 // CLI args
@@ -55,7 +55,8 @@ const LOCKFILE: string = lockfilePath;
 const TOKEN: string = randomBytes(24).toString('hex');
 
 // ============================================================================
-// Windowing constants — MUST mirror trainer/chunker_v2.py
+// Windowing constants — MUST mirror trainer/chunker_v3.py
+// (X_CHARS == TWO_X == 448 == the ONNX sequence length)
 // ============================================================================
 
 const MIN_CHUNK_CHARS = 8;
@@ -221,9 +222,14 @@ async function scoreWindow(text: string, st: EncoderState): Promise<number> {
 }
 
 const HINT = /(\bhowever\b|\bwait\b|\bbut\b|\bactually\b|\breconsider\b|\bon second thought\b|但|不过|其实|然而|等等|话说回来)/i;
+/** Returns the matched word and its CODE-POINT offset within `win`. */
 function lexicalHint(win: string): { word: string; offset: number } | null {
   const m = win.match(HINT);
-  return m && m.index !== undefined ? { word: m[0], offset: m.index } : null;
+  if (!m || m.index === undefined) return null;
+  // m.index is a UTF-16 offset; convert the prefix length to code points so
+  // the returned offset aligns with the code-point spans.
+  const offset = toCodePoints(win.slice(0, m.index)).length;
+  return { word: m[0], offset };
 }
 
 // ============================================================================
@@ -239,10 +245,14 @@ interface DetectResult {
 
 async function detect(text: string, threshold: number): Promise<DetectResult> {
   const st = await ensureLoaded();
-  const spans = buildChunksV2(text);
+  const spans = buildChunksV3(text);
+  // Spans are CODE-POINT offsets (matching trainer/chunker_v3.py). To extract
+  // the window text we must slice the code-point array, not the raw string —
+  // String.slice indexes UTF-16 units and misaligns on astral characters.
+  const cp = toCodePoints(text);
   let best: { score: number; span: CharSpan } | null = null;
   for (const span of spans) {
-    const win = text.slice(span.start, span.end);
+    const win = sliceCodePoints(cp, span.start, span.end);
     if (win.trim().length < MIN_CHUNK_CHARS) continue;
     const score = await scoreWindow(win, st);
     if (Number.isNaN(score)) continue;
@@ -251,8 +261,11 @@ async function detect(text: string, threshold: number): Promise<DetectResult> {
     if (best === null || score > best.score) best = { score, span };
   }
   if (best === null || best.score < threshold) return { turn: false };
-  const win = text.slice(best.span.start, best.span.end);
+  const win = sliceCodePoints(cp, best.span.start, best.span.end);
   const hint = lexicalHint(win);
+  // hint.offset is a code-point index within `win`; best.span.start is a
+  // code-point offset into the whole text, so the sum is a code-point index
+  // into `text` — which is what callers index by (e.g. for slicing words).
   return {
     turn: true,
     word: hint?.word ?? '',
