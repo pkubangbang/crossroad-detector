@@ -18,15 +18,16 @@ function ok(name: string, cond: boolean, detail?: string): void {
   else { failed++; console.log(`  FAIL  ${name}${detail ? ` — ${detail}` : ''}`); }
 }
 
-/** Assert a segment list exactly tiles [0, total) with no gaps or overlaps. */
-function tiles(segs: Segment[], total: number): boolean {
-  let cursor = 0;
-  for (const s of segs) {
-    if (s.start !== cursor) return false;
-    if (s.end <= s.start) return false;
-    cursor = s.end;
-  }
-  return cursor === total;
+/**
+ * Assert a segment list is the trainer's lattice: strictly increasing, every
+ * range non-empty, and equal to `expected`. The lattice is NOT a partition —
+ * the trainer drops whitespace-only parts and leaves them uncovered (for a
+ * strict partition the consumer carries a boundary character into the next
+ * unit, which is mycc's rule, not this package's).
+ */
+function sameLattice(segs: Segment[], expected: Array<[number, number]>): boolean {
+  if (segs.length !== expected.length) return false;
+  return segs.every((s, i) => s.start === expected[i][0] && s.end === expected[i][1] && s.end > s.start);
 }
 
 const text = (cp: string[], segs: Segment[]): string[] =>
@@ -44,7 +45,11 @@ function main(): void {
     const c = s.flush();
     const all = [...a, ...b, ...c];
     const total = 'Hello there. How are you?'.length;
-    ok('segments tile the whole text', tiles(all, total), JSON.stringify(all));
+    ok(
+      'the lattice is the trainer lattice',
+      sameLattice(all, [[0, 12], [12, 25]]),
+      JSON.stringify(all),
+    );
     ok('second-push offset is absolute', all.every((x) => x.start >= 0 && x.end <= total), JSON.stringify(all));
     ok('no segment starts inside the delta frame', all.filter((x) => x.start >= 13).every((x) => x.start >= 13), JSON.stringify(all));
   }
@@ -61,27 +66,39 @@ function main(): void {
     const laterKeys = [...later, ...flushed].map(byKey);
     ok('no segment from an earlier push reappears', laterKeys.every((k) => !firstKeys.has(k)), JSON.stringify({ first: [...firstKeys], later: laterKeys }));
     const all = [...first, ...later, ...flushed];
-    ok('all pushes together tile the text', tiles(all, 'One sentence here. Another one there. Third. '.length), JSON.stringify(all));
+    ok(
+      'all pushes together form the unchanged trainer lattice',
+      sameLattice(all, [[0, 18], [18, 37], [37, 44], [44, 45]]),
+      JSON.stringify(all),
+    );
   }
 
   // ------------------------------------------------------------------
-  console.log('\n[3] Tail ambiguity: "3." must not split before "14"');
+  console.log('\n[3] Tail ambiguity, and numbers split like the trainer');
   {
     const s = createSegmenter();
     const a = s.push('The failure is version 3.');
     ok('push ending in "." emits nothing (ambiguous tail)', a.length === 0, JSON.stringify(a));
     ok('pending holds the whole ambiguous tail', s.pending === 'The failure is version 3.', JSON.stringify(s.pending));
+
+    // "3." IS a boundary for the trainer: SENT_SPLIT is a plain look-behind
+    // over its delimiter set, so "3.14" splits after the "." exactly as
+    // build_segments does. Verified against trainer/chunker.py.
     const b = s.push('14 of the library.');
-    // "3." was NOT a boundary: a '.' followed by a digit is a decimal. Both the
-    // push that completed "3.14" and the following text stay pending until a
-    // real sentence terminator arrives.
-    ok('the whole decimal sentence stays pending', s.pending === 'The failure is version 3.14 of the library.', JSON.stringify(s.pending));
-    ok('pending contains an intact "3.14"', s.pending.includes('3.14'), JSON.stringify(s.pending));
+    const bText = text(Array.from('The failure is version 3.14 of the library.'), b);
+    ok('"3." closes a part once the next char arrives', b.length > 0, JSON.stringify(b));
+    ok('the part is exactly "The failure is version 3."', bText[0] === 'The failure is version 3.', JSON.stringify(bText));
+
     const c = s.flush();
     const cp = Array.from('The failure is version 3.14 of the library.');
     const all = [...a, ...b, ...c];
-    ok('after flush, "3.14" is intact in one segment', text(cp, all).some((p) => p.includes('3.14')), JSON.stringify(text(cp, all)));
-    ok('and the whole text is tiled after flush', tiles(all, cp.length), JSON.stringify(all));
+    ok('flush leaves nothing pending', s.pending === '', JSON.stringify(s.pending));
+    ok(
+      'the whole lattice is the trainer lattice',
+      sameLattice(all, [[0, 25], [25, 43]]),
+      JSON.stringify(all),
+    );
+    ok('lattice spans lie inside the text', all.every((x) => x.end <= cp.length), JSON.stringify(all));
   }
 
   // ------------------------------------------------------------------
@@ -102,7 +119,7 @@ function main(): void {
     const forced = segs.filter((x) => x.cutKind === 'forced');
     ok('long unpunctuated run produces forced segments', forced.length > 0, JSON.stringify(segs.map((x) => [x.start, x.end, x.cutKind])));
     ok('each forced piece is exactly segMax wide', forced.every((x) => x.end - x.start === 224), JSON.stringify(forced));
-    ok('forced tiling still covers the whole text', tiles(segs, 500), JSON.stringify(segs));
+    ok('each forced piece follows the previous one', segs.every((x, i) => i === 0 || x.start === segs[i - 1].end), JSON.stringify(segs));
   }
 
   // ------------------------------------------------------------------
@@ -118,7 +135,11 @@ function main(): void {
       [...sentenceEnds].every((e) => trained.some((x) => x.end === e)),
       `${JSON.stringify(sentence.map((x) => x.end))} vs ${JSON.stringify(trained.map((x) => x.end))}`,
     );
-    ok('sentence policy still tiles the text', tiles(sentence, t.length), JSON.stringify(sentence));
+    ok(
+      'the sentence policy emits exactly its own boundaries',
+      sameLattice(sentence, [[0, 39], [39, 46]]),
+      JSON.stringify(sentence),
+    );
   }
 
   // ------------------------------------------------------------------
@@ -128,7 +149,11 @@ function main(): void {
     const segs = segmentsOf(t);
     const cpLen = Array.from(t).length;
     ok('offsets are code points, not UTF-16 units', segs[segs.length - 1].end === cpLen, `end=${segs[segs.length - 1].end} cpLen=${cpLen} (utf16=${t.length})`);
-    ok('tiles by code point', tiles(segs, cpLen), JSON.stringify(segs));
+    ok(
+      'offsets are code points across the whole text',
+      sameLattice(segs, [[0, 11], [11, 21]]),
+      JSON.stringify(segs),
+    );
   }
 
   // ------------------------------------------------------------------
@@ -136,7 +161,7 @@ function main(): void {
   {
     ok('empty text yields nothing', segmentsOf('').length === 0);
     const ws = segmentsOf('   ');
-    ok('whitespace-only still tiles', ws.length > 0 && tiles(ws, 3), JSON.stringify(ws));
+    ok('whitespace-only input is a single part', sameLattice(ws, [[0, 3]]), JSON.stringify(ws));
     const s = createSegmenter();
     ok('push("") returns []', s.push('').length === 0);
     ok('pending is "" on a fresh segmenter', s.pending === '');

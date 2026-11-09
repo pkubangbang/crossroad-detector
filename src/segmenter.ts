@@ -89,6 +89,7 @@ export interface Segmenter {
 
 const SENTENCE_TERMINATORS = new Set(['.', '!', '?', '。', '！', '？']);
 const CLAUSE_PUNCT = new Set([',', ';', ':', '，', '；', '：']);
+const NEWLINES = new Set(['\n', '\r']);
 
 function isSpace(ch: string): boolean {
   return /\s/.test(ch);
@@ -102,6 +103,7 @@ export function createSegmenter(options?: SegmenterOptions): Segmenter {
   const frame: string[] = [];
   /** Index in `frame` of the first code point not yet emitted. */
   let emitted = 0;
+
 
   /** Does `ch` end a segment under the current policy? */
   function isBoundaryAt(i: number): SegmentCutKind | null {
@@ -118,11 +120,11 @@ export function createSegmenter(options?: SegmenterOptions): Segmenter {
     if (SENTENCE_TERMINATORS.has(ch)) {
       const next = i + 1 < frame.length ? frame[i + 1] : undefined;
       if (next === undefined) return null; // ambiguous until next char
-      // '.' followed by a digit is a decimal ("3.14"), not a sentence end —
-      // the same rule firstSentenceEnd enforces on mycc's side.
-      if (isSpace(next)) return 'sentence';
-      if (next === '.' || /\d/.test(next)) return null;
-      return 'clause';
+      // The trainer's SENT_SPLIT is a plain look-behind over its delimiter
+      // set, so EVERY terminator is a boundary, even inside "0.9.7" or "...".
+      // The boundary is the character itself — a blank run after it belongs to
+      // the next part, so it must NOT be closed here ('para\n\n' ends at 6).
+      return 'sentence';
     }
     if (policy === 'trained' && CLAUSE_PUNCT.has(ch)) {
       const next = i + 1 < frame.length ? frame[i + 1] : undefined;
@@ -130,6 +132,12 @@ export function createSegmenter(options?: SegmenterOptions): Segmenter {
       return 'clause';
     }
     return null;
+  }
+
+  /** Is every code point of [from, to) whitespace? */
+  function isBlank(from: number, to: number): boolean {
+    for (let i = from; i < to; i++) if (!isSpace(frame[i])) return false;
+    return true;
   }
 
   /** Emit one confirmed run [start,end) as segments, tiling if too long. */
@@ -147,6 +155,9 @@ export function createSegmenter(options?: SegmenterOptions): Segmenter {
   function drain(final: boolean): Segment[] {
     const out: Segment[] = [];
     let start = emitted;
+    // Does this part hold any non-space? The trainer keeps a part only when
+    // its strip() is truthy.
+    let content = false;
 
     for (let i = emitted; i < frame.length; i++) {
       const ch = frame[i];
@@ -157,17 +168,55 @@ export function createSegmenter(options?: SegmenterOptions): Segmenter {
       const isTerminator = SENTENCE_TERMINATORS.has(ch);
       if (isTerminator && i === frame.length - 1 && !final) break;
 
-      const kind = isBoundaryAt(i);
-      if (kind === null) continue;
+      // The blank run after this boundary character may still grow (more
+      // spaces, or a newline), so the part it closes and the part it opens are
+      // both decided at flush. Holding only matters when the run could still
+      // CHANGE the answer: a newline never does (it is always its own part),
+      // so only a plain blank run is held back.
 
-      emitRun(out, start, i + 1, kind);
-      start = i + 1;
+      const kind = isBoundaryAt(i);
+      if (kind === null) {
+        if (!isSpace(ch)) content = true;
+        continue;
+      }
+
+      // A boundary character OPENS the next part: the trainer locates parts
+      // with `text.find(part, cursor)`, so the blank run after a part belongs
+      // to the NEXT part when that part holds content ('A. B.' -> ' B.') and
+      // is skipped when it does not ('A.\n\nB.' -> 'A.', 'B.'). The part here
+      // therefore ends at its boundary character.
+      const partEnd = i + 1;
+
+      if (isBlank(start, partEnd) && !content) {
+        // Whitespace-only part: dropped by the trainer's `p.strip()` filter, so
+        // it is consumed without a segment and left uncovered.
+        start = partEnd;
+        content = false;
+        continue;
+      }
+      emitRun(out, start, partEnd, kind);
+      start = partEnd;
+      content = false;
     }
 
-    if (final && start < frame.length) {
-      emitRun(out, start, frame.length, 'sentence');
-      start = frame.length;
-    } else if (!final) {
+    // The trainer's residue step is `if cursor < len(text): segs.append(
+    // (cursor, len))`: the cursor sits at the end of the last located part, so
+    // the residue is exactly the text after it — including a blank run that
+    // ends the document ('One. Two. ' -> (9,10), 'para\n\n' -> (5,6)) — and
+    // when no part was located at all the cursor is still 0 ('\n' -> (0,1)).
+    if (final) {
+      // The held boundary character closes its part. With the whole text known
+      // the part has no next part after it, so — exactly like the trainer's
+      // cursor, which by then sits past that part's blank run — it keeps the
+      // run: 'Line one.\n' -> (9,10), '\n' -> (0,1), 'para\n\n' -> (5,6).
+      if (start < frame.length) {
+        // Otherwise the tail is the trainer's trailing residue:
+        // `if cursor < len(text): segs.append((cursor, len))`.
+        //   'One. Two. ' -> (9,10)      '   ' -> (0,3)
+        emitRun(out, start, frame.length, 'sentence');
+        start = frame.length;
+      }
+    } else if (!final && content) {
       // Steady progress for a very long unpunctuated run: emit forced pieces
       // but keep the remainder (< segMax) pending.
       while (frame.length - start > segMax) {
