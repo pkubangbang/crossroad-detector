@@ -72,8 +72,8 @@ learnable — the v2 failure pinned at exactly 0.693.
 The chunker is the only thing that changed for v1.3. To retrain from the R4 corpus:
 
 ```powershell
-# 1. (re)generate v3 chunks from the balanced corpus
-trainer/.venv/Scripts/python.exe trainer/chunker_v3.py `
+# 1. (re)generate chunks from the balanced corpus
+trainer/.venv/Scripts/python.exe trainer/chunker.py `
     --in trainer/corpus/r4.balanced.jsonl `
     --out trainer/corpus/r4.balanced.chunks.v3.jsonl `
     --report trainer/corpus/r4.balanced.chunks.v3.stats.json --seed 42
@@ -119,7 +119,7 @@ peer fleet (20 mycc instances)  +   .mycc/sessions (real data)
 trainer/corpus/inbox/<sessionId>/*.jsonl
    (harvest.cjs → corpus/harvested.jsonl)
         │  validate_corpus.py            (doc-level gate)
-        │  chunker_v3.py                 (deterministic OVERLAPPING chunking)
+        │  chunker.py                    (deterministic OVERLAPPING chunking)
         │  validate_corpus.py --level chunk   (chunk-level gate)
         ▼
    chunk-level training data (corpus/r4.balanced.chunks.v3.jsonl)
@@ -174,10 +174,10 @@ working size. The turn signal is **local**: the classifier asks "is a reversal
 happening around this point?", so the window only needs to contain the turn plus
 its immediate lead-in.
 
-The active chunker is **v3** (`chunker_v3.py`) — a segment-level adaptive
-**overlapping** sliding window. It supersedes v2 (`chunker_v2.py`, a
-non-overlapping tile-by-cap) and v1 (`chunking.py`, fixed 128/32 char windows).
-Both old chunkers are kept in-tree but are no longer used.
+The active chunker is `chunker.py` — a segment-level adaptive **overlapping**
+sliding window. It supersedes the non-overlapping tile-by-cap chunker and the
+fixed 128/32-char window chunker (`chunking.py`), both of which remain in-tree
+only where a legacy eval script still imports them.
 
 The core principle: **windows overlap**, so a turn near a boundary appears in
 ≥2 windows and is seen from more than one offset — the property v2 lost.
@@ -193,7 +193,7 @@ Segment construction (shared with v2): split into sub-sentences by punctuation
 (`.!?,;:\n` + CJK `。！？，；：`, delimiter attached), then hard-cap each at 224
 chars. On those segments the v3 window slides: expand the suffix to ≤ `THREE_X`,
 shrink the prefix to the FIRST span < `TWO_X` (minimal drop = maximal overlap),
-emit. See `chunker_v3.md` for the full spec and rationale.
+emit. See `chunker.md` for the full spec and rationale.
 
 R4 corpus effect: **5,823 → 7,069 chunks** (v2 → v3), **794 → 868** positive
 chunks (+27% / +36%) — the quantification of "a boundary turn appears in ≥2
@@ -273,12 +273,10 @@ crossroad-detector/trainer/
   README.md                  this file
   requirements.txt           pinned Python deps
   schemas/corpus.schema.json the contract handed to the peer fleet
-  chunker_v3.py              THE chunker (segment adaptive overlap) — active
-  chunker_v2.py              superseded tile-by-cap chunker (segment lattice reused)
+  chunker.py                 THE chunker (segment adaptive overlap) — active
   chunking.py                superseded fixed 128/32 window chunker (v1)
-  chunker_v3.md              v3 design spec + rationale
+  chunker.md                 chunker design spec + rationale
   check_doc_leak.py          doc/topic-level split-leak proof
-  dump_v3_spans.py           emit v3 spans for TS parity (scripts/check_v3_parity.mjs)
   gen_chunks.py              derive labelled chunks from documents (legacy driver)
   validate_corpus.py         doc-level AND chunk-level gate (--level chunk)
   train.py                   fine-tune distilbert-base-multilingual-cased

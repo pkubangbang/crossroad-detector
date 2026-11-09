@@ -1,8 +1,7 @@
-# Chunker v3 — 段级自适应重叠滑动窗口
+# Chunker — 段级自适应重叠滑动窗口
 
-> 状态：设计已确认并实现于 `trainer/chunker_v3.py`（训练侧）。
-> `chunker_v2.py` 保持不动，v3 是它的后继。本文档解释 v3 的原理、与 v2 的区别、
-> 以及为什么这个改动是本次重训的关键改进。
+> 状态：实现于 `trainer/chunker.py`（训练侧）。
+> 本文档解释段级自适应重叠切分的原理，以及为什么重叠是本次重训的关键改进。
 
 ## 1. 背景：为什么需要重叠
 
@@ -27,9 +26,8 @@ crossroad）。检测是**事后**对完整响应做的：把整段文本切成�
 | 版本 | 文件 | 算法 | 是否重叠 |
 |---|---|---|---|
 | **v1** | `chunking.py` | 固定字符窗口 `WINDOW=128 / STRIDE=32`，75% 重叠 | ✅ 重叠 |
-| **v2** | `chunker_v2.py` | 段级 tile-by-cap，`X_CHARS=448 / SEG_MAX=224`，连续铺盖 | ❌ **不重叠** |
-| **v3** | `chunker_v3.py` | 段级**自适应重叠**滑动窗口，`X=224 / 2X=448 / 3X=672` | ✅ 重叠 |
-
+| **v2** | `chunker_v2.py`（已删除） | 段级 tile-by-cap，448 / 224，连续铺盖 | ❌ **不重叠** |
+| **v3** | `chunker.py`（现行） | 段级**自适应重叠**滑动窗口，`224 / 448 / 672` | ✅ 重叠 |
 - **v1** 用固定字符步长重叠，简单但窗口边界是硬切字符位置，与语义内容
   （句子/子句）无关。
 - **v2** 引入了"段"（segment）概念——先按标点切子句、每段硬上限 224 字符
@@ -252,8 +250,8 @@ v3 的 chunk JSONL 与 v2 逐字段相同，`train.py` / `eval_test` /
 
 ## 引用
 
-- `trainer/chunker_v3.py` — v3 实现（本任务产出）
-- `trainer/chunker_v2.py` — v2 实现（段切分逻辑被 v3 复用）
+- `trainer/chunker.py` — 实现
+- `src/chunker.ts` — 服务端 1:1 移植
 - `trainer/plan-crossroad-distilbert-chunks.md` — 原始设计文档（主张重叠）
 - `trainer/check_doc_leak.py` — doc-level split 泄漏验证工具
 - `trainer/train.py` — `split_by_doc`（doc_id/topic_id 连通分量切分）
