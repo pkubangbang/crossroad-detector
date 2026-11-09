@@ -1,40 +1,41 @@
 /**
- * chunker.ts — segment-based chunkers (v2 tile-by-cap, v3 adaptive overlap).
+ * chunker.ts - the current segment builder (adaptive overlapping).
  *
- * The ACTIVE serving chunker is v3 (`buildChunksV3`), a 1:1 port of
- * trainer/chunker_v3.py. The model was trained on windows produced by that
- * chunker, so serving MUST use the same window boundaries — a plain
- * fixed-width tiling (or the older v2 tiling) over raw character offsets would
- * feed the model out-of-distribution windows.
+ * uildSpans is a 1:1 port of trainer/chunker.py. The model was trained on
+ * the spans it produces, so serving MUST use the same boundaries - a
+ * fixed-width tiling over raw character offsets would feed the model
+ * out-of-distribution input.
  *
- * v2 (`buildChunksV2`) is retained for reference/parity — it is the chunker the
- * previous (v8) model was trained on — but the server no longer uses it.
+ * These spans OVERLAP. Consecutive spans deliberately share text so a turn near
+ * a boundary is seen from more than one offset. Because they overlap they are
+ * NOT cut positions: at a given offset two spans can both contain the text.
+ * Cut positions must be a partition, and createSegmenter (segmenter.ts)
+ * produces those.
  *
- * Both are kept in this module so the server and parity tests share the exact
- * same implementation.
+ * All offsets in this module are CODE POINTS, not UTF-16 code units.
  */
 
 /**
- * The window "cap" and the ONNX sequence length. In v3 this is `TWO_X` (the
- * window target upper bound); in v2 it was `X_CHARS`. Both are 448, so the
- * server's fixed ONNX seq length is unchanged.
+ * The input sequence length, and the target upper bound for one span.
+ * They are equal (448), so a span fits the model's fixed sequence without
+ * truncation.
  */
-export const X_CHARS = 448;
-/** Segment size cap; < 0.5 * X_CHARS. */
-export const SEG_MAX = 224;
+export const SEQ_LEN = 448;
+/** Segment size cap: a longer sub-sentence is tiled; < 0.5 * SEQ_LEN. */
+export const CLAUSE_TILE_MAX = 224;
 
-// --- v3 adaptive-overlap parameters (mirror chunker_v3.py) ---
-/** Segment max chars = SEG_MAX. In the Python spec this is `X`. */
-export const V3_X = SEG_MAX; // 224
-/** Window target upper bound (chunk "cap"). */
-export const TWO_X = 2 * V3_X; // 448
+// --- adaptive-overlap parameters ---
+/** Segment max size = SEG_MAX. In the Python spec this is `X`. */
+export const GROW_UNIT = CLAUSE_TILE_MAX; // 224
+/** Input-span target upper bound (the span "cap"). */
+export const SPAN_TARGET_MAX = 2 * GROW_UNIT; // 448
 /** Buffer expansion upper bound during the suffix-growth step. */
-export const THREE_X = 3 * V3_X; // 672
+export const SPAN_GROW_MAX = 3 * GROW_UNIT; // 672
 
 export interface CharSpan { start: number; end: number; }
 
 // Sentence-ending punctuation (Latin + CJK); delimiter stays attached to the
-// preceding sub-sentence. Mirrors _SENT_SPLIT in chunker_v2.py.
+// preceding sub-sentence. Mirrors _SENT_SPLIT in chunker.py.
 const SENT_SPLIT = /(?<=[.!?,;:\n。！？，；：])/;
 
 /**
@@ -81,7 +82,7 @@ function isWhitespace(ch: string): boolean {
 }
 
 /** Split one sub-sentence span into <=segMax-code-point segments. */
-function splitSegmentsCp(start: number, end: number, segMax = SEG_MAX): CharSpan[] {
+function splitSegmentsCp(start: number, end: number, segMax = CLAUSE_TILE_MAX): CharSpan[] {
   const out: CharSpan[] = [];
   let i = start;
   while (i < end) {
@@ -110,53 +111,20 @@ export function splitSubsentences(text: string): string[] {
   const cp = toCodePoints(text);
   return splitSubsentencesCp(cp).map((s) => cp.slice(s.start, s.end).join(''));
 }
-export function splitSegments(sub: string, segMax = SEG_MAX): CharSpan[] {
+export function splitSegments(sub: string, segMax = CLAUSE_TILE_MAX): CharSpan[] {
   return splitSegmentsCp(0, toCodePoints(sub).length, segMax);
 }
 
 /** Slice `text` by CODE-POINT offsets [start, end) — the offsets produced by
- *  buildSegments/buildChunks*. Do NOT use String.prototype.slice on these
+ *  buildSegments/buildSpans. Do NOT use String.prototype.slice on these
  *  offsets: it indexes UTF-16 units and will misalign on astral characters. */
 export function sliceCodePoints(cp: string[], start: number, end: number): string {
   return cp.slice(start, end).join('');
 }
 
-/**
- * Greedily append segments from `left` while total span <= cap.
- * Returns the exclusive right index (one past the last included segment).
- */
-function growToCap(segs: CharSpan[], left: number, n: number, cap: number): number {
-  let right = left + 1;
-  while (right < n && segs[right].end - segs[left].start <= cap) right += 1;
-  return right;
-}
-
-/**
- * Segment chunker with full, contiguous coverage (tile-by-cap) — mirrors
- * chunker_v2.build_chunks_v2. Returns whole-document char spans, sorted.
- */
-export function buildChunksV2(text: string): CharSpan[] {
-  const segs = buildSegments(text);
-  if (segs.length === 0) return [];
-  const n = segs.length;
-  const chunks: CharSpan[] = [];
-  let left = 0;
-  while (left < n) {
-    const right = growToCap(segs, left, n, X_CHARS);
-    const span: CharSpan = { start: segs[left].start, end: segs[right - 1].end };
-    if (span.end > span.start) {
-      const last = chunks[chunks.length - 1];
-      if (!last || last.start !== span.start || last.end !== span.end) chunks.push(span);
-    }
-    if (right >= n) break;
-    left = right;
-  }
-  return chunks;
-}
-
 // ============================================================================
-// v3 — segment-level ADAPTIVE OVERLAPPING sliding window
-// (1:1 port of trainer/chunker_v3.py: build_chunks_v3)
+// Adaptive overlapping segment builder
+// (1:1 port of trainer/chunker.py: build_spans)
 // ============================================================================
 
 /**
@@ -181,15 +149,15 @@ function shrinkPrefixBelow(segs: CharSpan[], left: number, right: number, cap: n
 
 /**
  * Segment-level adaptive overlapping sliding window — mirrors
- * chunker_v3.build_chunks_v3. Returns whole-document char spans, sorted, with
+ * chunker.build_spans. Returns whole-document char spans, sorted, with
  * overlap between consecutive chunks so a turn near a boundary appears in >= 2
  * windows. Chunks other than the first/last special cases are bounded by
- * THREE_X after suffix growth and by < TWO_X after prefix shrink.
+ * SPAN_GROW_MAX after suffix growth and by < SPAN_TARGET_MAX after prefix shrink.
  *
  * The `firstTurnPos` argument mirrors the Python signature; it does not affect
  * the spans (labelling is done by the caller / training harness).
  */
-export function buildChunksV3(text: string, firstTurnPos?: number | null): CharSpan[] {
+export function buildSpans(text: string, firstTurnPos?: number | null): CharSpan[] {
   void firstTurnPos; // spans are independent of the turn position, as in Python
   const segs = buildSegments(text);
   if (segs.length === 0) return [];
@@ -200,16 +168,16 @@ export function buildChunksV3(text: string, firstTurnPos?: number | null): CharS
 
   // ---- Step 1: initial buffer, first chunk (start special handling) ----
   let left = 0;
-  let right = growSuffixTo(segs, left, left + 1, n, TWO_X);
+  let right = growSuffixTo(segs, left, left + 1, n, SPAN_TARGET_MAX);
   const first: CharSpan = { start: segs[left].start, end: segs[right - 1].end };
   if (first.end > first.start) chunks.push(first);
 
   // ---- Step 3: sliding loop ----
   while (right < n) {
-    // (a) expand suffix to <= THREE_X
-    right = growSuffixTo(segs, left, right, n, THREE_X);
-    // (b) shrink prefix to first < TWO_X (minimal drop = maximal overlap)
-    left = shrinkPrefixBelow(segs, left, right, TWO_X);
+    // (a) expand suffix to <= SPAN_GROW_MAX
+    right = growSuffixTo(segs, left, right, n, SPAN_GROW_MAX);
+    // (b) shrink prefix to first < SPAN_TARGET_MAX (minimal drop = maximal overlap)
+    left = shrinkPrefixBelow(segs, left, right, SPAN_TARGET_MAX);
     // (c) emit chunk
     const span: CharSpan = { start: segs[left].start, end: segs[right - 1].end };
     if (span.end > span.start && (chunks.length === 0 || !same(chunks[chunks.length - 1], span))) {
@@ -217,7 +185,7 @@ export function buildChunksV3(text: string, firstTurnPos?: number | null): CharS
     }
     // Safety: if the window did not advance (degenerate single huge segment),
     // force right forward to guarantee progress. Mirrors the Python guard.
-    if (right <= growSuffixTo(segs, left, left + 1, n, THREE_X) && left === 0 && right === 1) {
+    if (right <= growSuffixTo(segs, left, left + 1, n, SPAN_GROW_MAX) && left === 0 && right === 1) {
       right = Math.min(right + 1, n);
     }
   }

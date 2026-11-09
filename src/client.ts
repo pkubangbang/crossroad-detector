@@ -8,9 +8,16 @@
  *
  * The client lazily spawns a detached HTTP server on first use, managed via
  * the lockfile at the path passed to the constructor. The server auto-shuts-
- * down after 15 min idle. If the package is not installed, the server fails
- * to start, or any error occurs, detect() returns null so the caller can fall
- * back (e.g. to a regex detector).
+ * down after 15 min idle.
+ *
+ * detect() distinguishes two outcomes that used to be collapsed into null:
+ *   - `null`                          → inference RAN and found no turn.
+ *   - `CrossroadUnavailableError`     → infrastructure failure (spawn failed,
+ *                                       HTTP error, timeout, malformed
+ *                                       response). The detection did not run;
+ *                                       the caller may fall back.
+ * The error message always names which of those happened, because "the model
+ * server is gone" and "the server answered garbage" need different fixes.
  *
  * Spawn uses detached:true + windowsHide:true — on Windows, without
  * detached:true the child shares the parent's console group and is silently
@@ -47,6 +54,31 @@ export interface CrossroadDetectorOptions {
   threshold?: number;
   /** Timeout for server spawn + health check (ms). Default 15000. */
   spawnTimeout?: number;
+  /** Timeout for a single /detect request (ms). Default 30000. */
+  detectTimeout?: number;
+}
+
+/** Which kind of infrastructure failure kept the detection from running. */
+export type CrossroadUnavailableReason = 'spawn-failed' | 'http-error' | 'timeout' | 'malformed-response';
+
+/**
+ * Thrown by detect() when the detection could NOT run — as opposed to
+ * returning null, which means it ran and found no turn.
+ *
+ * The message always names the specific failure, e.g.
+ *   "crossroad detector unavailable (spawn-failed): server script not found: …"
+ *   "crossroad detector unavailable (http-error): HTTP 500: …"
+ *   "crossroad detector unavailable (timeout): /detect exceeded 30000ms"
+ *   "crossroad detector unavailable (malformed-response): expected JSON …"
+ */
+export class CrossroadUnavailableError extends Error {
+  readonly reason: CrossroadUnavailableReason;
+
+  constructor(reason: CrossroadUnavailableReason, detail: string, options?: { cause?: unknown }) {
+    super(`crossroad detector unavailable (${reason}): ${detail}`, options);
+    this.name = 'CrossroadUnavailableError';
+    this.reason = reason;
+  }
 }
 
 // ============================================================================
@@ -120,37 +152,77 @@ export class CrossroadDetector {
   private readonly lockfilePath: string;
   private readonly threshold: number;
   private readonly spawnTimeout: number;
+  private readonly detectTimeout: number;
   private cachedPort: number | null = null;
   /** In-flight spawn so concurrent detect() calls share ONE server. */
-  private spawnPromise: Promise<number | null> | null = null;
+  private spawnPromise: Promise<number> | null = null;
 
   constructor(lockfilePath: string, options?: CrossroadDetectorOptions) {
     this.lockfilePath = lockfilePath;
     this.threshold = options?.threshold ?? 0.5;
     this.spawnTimeout = options?.spawnTimeout ?? 15000;
+    this.detectTimeout = options?.detectTimeout ?? 30000;
   }
 
   /**
    * Detect a turning word in the given text.
-   * Returns the match, or null if no turn is detected or the server is
-   * unavailable (caller should fall back).
+   *
+   * @returns the match, or `null` when inference ran and found no turn.
+   * @throws  {@link CrossroadUnavailableError} when the detection could not
+   *          run at all (spawn failure, HTTP error, timeout, malformed
+   *          response). The error's `reason` and message identify which.
    */
   async detect(content: string): Promise<TurningWordMatch | null> {
+    const port = await this.ensureServer();
+    const url = `http://127.0.0.1:${port}/detect`;
+
+    let resp: string;
     try {
-      const port = await this.ensureServer();
-      if (port === null) return null;
-      const url = `http://127.0.0.1:${port}/detect`;
-      const resp = await httpPostJson(url, { text: content, threshold: this.threshold }, 30000);
-      const data = JSON.parse(resp) as { turn: boolean; word?: string; index?: number; score?: number };
-      if (!data.turn) return null;
-      return {
-        word: typeof data.word === 'string' ? data.word : '',
-        index: typeof data.index === 'number' ? data.index : 0,
-        score: typeof data.score === 'number' ? data.score : 0,
-      };
-    } catch {
-      return null;
+      resp = await httpPostJson(url, { text: content, threshold: this.threshold }, this.detectTimeout);
+    } catch (err) {
+      throw this.asUnavailable(err, `/detect request to 127.0.0.1:${port}`);
     }
+
+    let data: { turn?: unknown; word?: unknown; index?: unknown; score?: unknown };
+    try {
+      data = JSON.parse(resp) as typeof data;
+    } catch (err) {
+      throw new CrossroadUnavailableError(
+        'malformed-response',
+        `/detect returned non-JSON (${resp.slice(0, 120)})`,
+        { cause: err },
+      );
+    }
+    if (typeof data?.turn !== 'boolean') {
+      throw new CrossroadUnavailableError(
+        'malformed-response',
+        `/detect response has no boolean "turn" field (${resp.slice(0, 120)})`,
+      );
+    }
+
+    if (!data.turn) return null;
+    return {
+      word: typeof data.word === 'string' ? data.word : '',
+      index: typeof data.index === 'number' ? data.index : 0,
+      score: typeof data.score === 'number' ? data.score : 0,
+    };
+  }
+
+  /**
+   * Map a low-level request failure onto a CrossroadUnavailableError whose
+   * message names the actual cause (timeout vs HTTP status vs transport).
+   */
+  private asUnavailable(err: unknown, what: string): CrossroadUnavailableError {
+    if (err instanceof CrossroadUnavailableError) return err;
+    const e = err as { name?: string; message?: string };
+    if (e?.name === 'AbortError') {
+      return new CrossroadUnavailableError('timeout', `${what} exceeded ${this.detectTimeout}ms`, { cause: err });
+    }
+    const message = e?.message ?? String(err);
+    if (/^HTTP \d{3}/.test(message)) {
+      return new CrossroadUnavailableError('http-error', message, { cause: err });
+    }
+    return new CrossroadUnavailableError('http-error', `${what} failed: ${message}`, { cause: err });
   }
 
   /**
@@ -185,7 +257,7 @@ export class CrossroadDetector {
   // Internal: ensure a server is running and return its port
   // ------------------------------------------------------------------
 
-  private async ensureServer(): Promise<number | null> {
+  private async ensureServer(): Promise<number> {
     // Fast path: cached port still alive
     if (this.cachedPort !== null) {
       if (await this.isHealthy(this.cachedPort)) return this.cachedPort;
@@ -220,8 +292,10 @@ export class CrossroadDetector {
     }
   }
 
-  private async spawnServer(): Promise<number | null> {
-    if (!existsSync(SERVER_SCRIPT)) return null;
+  private async spawnServer(): Promise<number> {
+    if (!existsSync(SERVER_SCRIPT)) {
+      throw new CrossroadUnavailableError('spawn-failed', `server script not found: ${SERVER_SCRIPT}`);
+    }
 
     // Clean a stale lockfile — but only if no live server owns it. A live
     // server may have been started by another process between our earlier
@@ -242,14 +316,20 @@ export class CrossroadDetector {
 
     // CRITICAL: without an 'error' listener, a failed spawn (ENOENT on the
     // runtime, missing script, EACCES) emits an unhandled 'error' event that
-    // aborts the HOST process — violating this SDK's "return null on any
-    // error" contract. Attach a no-op listener so the failure is contained.
+    // aborts the HOST process. Attach a listener so the failure is contained
+    // and surfaced as a CrossroadUnavailableError instead.
     let spawnFailed = false;
-    child.on('error', () => { spawnFailed = true; });
+    let spawnError: unknown = null;
+    child.on('error', (err) => { spawnFailed = true; spawnError = err; });
 
     // A synchronous spawn failure leaves child.pid undefined.
     if (child.pid === undefined) {
-      return null;
+      throw new CrossroadUnavailableError(
+        'spawn-failed',
+        `could not start ${process.execPath} ${SERVER_SCRIPT}` +
+          (spawnError ? `: ${(spawnError as Error).message}` : ''),
+        { cause: spawnError ?? undefined },
+      );
     }
     child.unref();
 
@@ -257,7 +337,13 @@ export class CrossroadDetector {
     const deadline = Date.now() + this.spawnTimeout;
     while (Date.now() < deadline) {
       await sleep(300);
-      if (spawnFailed) return null;
+      if (spawnFailed) {
+        throw new CrossroadUnavailableError(
+          'spawn-failed',
+          `server process failed to start: ${(spawnError as Error | null)?.message ?? 'unknown error'}`,
+          { cause: spawnError ?? undefined },
+        );
+      }
       const lock = readLock(this.lockfilePath);
       if (lock && isProcessAlive(lock.pid)) {
         if (await this.isHealthy(lock.port)) {
@@ -266,7 +352,10 @@ export class CrossroadDetector {
         }
       }
     }
-    return null;
+    throw new CrossroadUnavailableError(
+      'timeout',
+      `server did not become healthy within ${this.spawnTimeout}ms`,
+    );
   }
 }
 

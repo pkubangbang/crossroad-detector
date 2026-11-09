@@ -29,7 +29,7 @@ import { argv, exit } from 'node:process';
 import { randomBytes } from 'node:crypto';
 
 import { writeLock, deleteLock } from './lockfile.js';
-import { buildChunksV3, toCodePoints, sliceCodePoints, X_CHARS, type CharSpan } from './chunker.js';
+import { buildSpans, toCodePoints, sliceCodePoints, SEQ_LEN, type CharSpan } from './chunker.js';
 
 // ============================================================================
 // CLI args
@@ -55,8 +55,8 @@ const LOCKFILE: string = lockfilePath;
 const TOKEN: string = randomBytes(24).toString('hex');
 
 // ============================================================================
-// Windowing constants — MUST mirror trainer/chunker_v3.py
-// (X_CHARS == TWO_X == 448 == the ONNX sequence length)
+// Span constants - MUST mirror trainer/chunker.py
+// (SEQ_LEN == SPAN_TARGET_MAX == 448 == the ONNX sequence length)
 // ============================================================================
 
 const MIN_CHUNK_CHARS = 8;
@@ -200,7 +200,7 @@ async function doLoad(): Promise<EncoderState> {
     graphOptimizationLevel: 'all',
   });
   const tok = loadVocab(MODEL_DIR);
-  state = { session, seqLen: X_CHARS, ...tok };
+  state = { session, seqLen: SEQ_LEN, ...tok };
   return state;
 }
 
@@ -245,8 +245,8 @@ interface DetectResult {
 
 async function detect(text: string, threshold: number): Promise<DetectResult> {
   const st = await ensureLoaded();
-  const spans = buildChunksV3(text);
-  // Spans are CODE-POINT offsets (matching trainer/chunker_v3.py). To extract
+  const spans = buildSpans(text);
+  // Spans are CODE-POINT offsets (matching trainer/chunker.py). To extract
   // the window text we must slice the code-point array, not the raw string —
   // String.slice indexes UTF-16 units and misaligns on astral characters.
   const cp = toCodePoints(text);
